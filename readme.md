@@ -236,6 +236,31 @@ The difference with `.onEmpty` is that `.onIdle` guarantees that all work from t
 > [!NOTE]
 > The promise returned by `.onIdle()` resolves **once** when the queue becomes idle. If you want to be notified every time the queue becomes idle, use the `idle` event instead: `queue.on('idle', () => {})`.
 
+#### .onPendingZero()
+
+Returns a promise that settles when all currently running tasks have finished; `queue.pending === 0`.
+
+Unlike `.onIdle()`, it does not wait for the queue to become empty. Items still waiting in the queue are ignored.
+
+This is useful when you want to pause the queue, wait for the running tasks to finish, and then safely perform an operation that must not overlap with task execution:
+
+```js
+import PQueue from 'p-queue';
+
+const queue = new PQueue({concurrency: 2});
+
+queue.add(() => fetchSomething());
+queue.add(() => fetchSomethingElse());
+
+queue.pause();
+await queue.onPendingZero();
+// Nothing is running now, so shared resources can be safely modified.
+queue.start();
+```
+
+> [!NOTE]
+> The promise returned by `.onPendingZero()` resolves **once** when the pending count reaches zero. If you want to be notified every time the pending count reaches zero, use the `pendingZero` event instead: `queue.on('pendingZero', () => {})`.
+
 #### .onSizeLessThan(limit)
 
 Returns a promise that settles when the queue size is less than the given limit: `queue.size < limit`.
@@ -418,6 +443,29 @@ await queue.add(() => delay(600));
 ```
 
 The `idle` event is emitted every time the queue reaches an idle state. On the other hand, the promise the `onIdle()` function returns resolves once the queue becomes idle instead of every time the queue is idle.
+
+#### pendingZero
+
+Emitted every time the number of running tasks reaches zero; `queue.pending === 0`.
+
+Unlike `idle`, this event does not take the queue size into account: it is emitted when the last running task finishes, even if more items are still queued (for example, while the queue is paused). If the queue is not paused, a queued task may start running immediately after this event is emitted.
+
+```js
+import delay from 'delay';
+import PQueue from 'p-queue';
+
+const queue = new PQueue({concurrency: 2});
+
+queue.on('pendingZero', () => {
+	console.log(`All running tasks finished.  Size: ${queue.size}  Pending: ${queue.pending}`);
+});
+
+queue.add(() => delay(2000));
+queue.add(() => delay(500));
+
+queue.pause();
+// => 'All running tasks finished.  Size: 0  Pending: 0'
+```
 
 #### add
 

@@ -273,6 +273,351 @@ test('.onIdle() - no pending', async () => {
 	assert.equal(await queue.onIdle(), undefined);
 });
 
+test('.onPendingZero()', async () => {
+	const queue = new PQueue({concurrency: 2});
+
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+	assert.equal(queue.size, 1);
+	assert.equal(queue.pending, 2);
+	await queue.onPendingZero();
+	assert.equal(queue.pending, 0);
+
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+	assert.equal(queue.pending, 2);
+	await queue.onPendingZero();
+	assert.equal(queue.pending, 0);
+});
+
+test('.onPendingZero() - no pending', async () => {
+	const queue = new PQueue();
+	assert.equal(queue.size, 0);
+	assert.equal(queue.pending, 0);
+
+	// eslint-disable-next-line @typescript-eslint/no-confusing-void-expression
+	assert.equal(await queue.onPendingZero(), undefined);
+});
+
+test('.onPendingZero() - resolves immediately when nothing is running', async () => {
+	const queue = new PQueue({autoStart: false});
+
+	queue.add(async () => '🦄');
+	queue.add(async () => '🦄');
+
+	assert.equal(queue.pending, 0);
+	assert.equal(queue.size, 2);
+
+	// Resolves immediately even though items are still queued
+	await queue.onPendingZero();
+
+	queue.start();
+	await queue.onIdle();
+});
+
+test('.onPendingZero() - resolves while items are queued when paused', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	const job1 = queue.add(async () => job1Promise);
+	queue.add(async () => '🦄');
+	queue.add(async () => '🦄');
+
+	assert.equal(queue.pending, 1);
+	assert.equal(queue.size, 2);
+
+	queue.pause();
+
+	const pendingZeroPromise = queue.onPendingZero();
+
+	resolveJob1();
+	await pendingZeroPromise;
+
+	assert.equal(queue.pending, 0);
+	assert.equal(queue.size, 2); // The queued items have not started
+
+	await job1;
+
+	queue.start();
+	await queue.onIdle();
+	assert.equal(queue.size, 0);
+});
+
+test('.onPendingZero() - pause, wait, and resume safely', async () => {
+	const queue = new PQueue({concurrency: 2});
+
+	const shared: string[] = [];
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	const {resolve: resolveJob2, promise: job2Promise} = pDefer();
+
+	queue.add(async () => {
+		await job1Promise;
+		shared.push('task1');
+	});
+	queue.add(async () => {
+		await job2Promise;
+		shared.push('task2');
+	});
+	queue.add(async () => {
+		shared.push('queued1');
+	});
+	queue.add(async () => {
+		shared.push('queued2');
+	});
+
+	// Pause and wait for the running tasks to finish
+	queue.pause();
+	const pendingZeroPromise = queue.onPendingZero();
+
+	resolveJob1();
+	resolveJob2();
+	await pendingZeroPromise;
+
+	// Nothing is running, so shared state can be safely modified
+	assert.equal(queue.pending, 0);
+	assert.equal(queue.size, 2);
+	shared.push('modified-while-paused');
+
+	queue.start();
+	await queue.onIdle();
+
+	assert.deepEqual(shared, ['task1', 'task2', 'modified-while-paused', 'queued1', 'queued2']);
+});
+
+test('.onPendingZero() - resolves after errors, timeouts, and aborts', async () => {
+	const queue = new PQueue({concurrency: 4, timeout: 50});
+
+	const controller = new AbortController();
+
+	const failing = queue.add(async () => {
+		await delay(10);
+		throw new Error('failure');
+	});
+	const timingOut = queue.add(async () => delay(500));
+	const aborting = queue.add(async () => delay(500), {signal: controller.signal});
+	const succeeding = queue.add(async () => delay(100));
+
+	assert.equal(queue.pending, 4);
+
+	let resolved = false;
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const pendingZeroPromise = queue.onPendingZero().then(() => {
+		resolved = true;
+	});
+
+	// Attach rejection handlers before aborting
+	const failingAssertion = assert.rejects(failing);
+	const abortingAssertion = assert.rejects(aborting);
+
+	controller.abort();
+
+	await failingAssertion;
+	await abortingAssertion;
+	assert.equal(queue.pending, 2);
+	assert.equal(resolved, false);
+
+	await timingOut;
+	await succeeding;
+	await pendingZeroPromise;
+
+	assert.equal(resolved, true);
+	assert.equal(queue.pending, 0);
+});
+
+test('.onPendingZero() - multiple waiters', async () => {
+	const queue = new PQueue({concurrency: 2});
+
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+
+	const waiter1 = queue.onPendingZero();
+	const waiter2 = queue.onPendingZero();
+	const waiter3 = queue.onPendingZero();
+
+	await Promise.all([waiter1, waiter2, waiter3]);
+	assert.equal(queue.pending, 0);
+
+	// All listeners are cleaned up after resolving
+	assert.equal(queue.listenerCount('pendingZero'), 0);
+});
+
+test('.onPendingZero() - does not wait again after resolving', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	queue.add(async () => delay(50));
+
+	let resolveCount = 0;
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const waiter = queue.onPendingZero().then(() => {
+		resolveCount++;
+	});
+
+	await waiter;
+	assert.equal(resolveCount, 1);
+	assert.equal(queue.listenerCount('pendingZero'), 0);
+
+	// Tasks started after the promise resolved must not affect it
+	queue.add(async () => delay(50));
+	queue.add(async () => delay(50));
+	await queue.onIdle();
+
+	assert.equal(resolveCount, 1);
+});
+
+test('.onPendingZero() - clear() does not affect running tasks', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+	queue.add(async () => delay(100));
+
+	assert.equal(queue.pending, 1);
+	assert.equal(queue.size, 2);
+
+	queue.clear();
+	assert.equal(queue.size, 0);
+	assert.equal(queue.pending, 1);
+
+	let resolved = false;
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const pendingZeroPromise = queue.onPendingZero().then(() => {
+		resolved = true;
+	});
+
+	await delay(50);
+	assert.equal(resolved, false); // The running task is still going
+
+	await pendingZeroPromise;
+	assert.equal(resolved, true);
+	assert.equal(queue.pending, 0);
+});
+
+test('.onPendingZero() - high concurrency', async () => {
+	const concurrency = 100;
+	const queue = new PQueue({concurrency});
+
+	const promises = [];
+	for (let index = 0; index < 500; index++) {
+		promises.push(queue.add(async () => delay(randomInt(10, 100))));
+	}
+
+	assert.equal(queue.pending, concurrency);
+
+	let resolved = false;
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const pendingZeroPromise = queue.onPendingZero().then(() => {
+		resolved = true;
+	});
+
+	await delay(50);
+	assert.equal(queue.pending, concurrency); // Still fully saturated
+	assert.equal(resolved, false);
+
+	await pendingZeroPromise;
+	assert.equal(resolved, true);
+	assert.equal(queue.pending, 0);
+
+	await Promise.all(promises);
+});
+
+test('.onPendingZero() - adding tasks while waiting', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	queue.add(async () => job1Promise);
+
+	queue.pause();
+
+	let resolved = false;
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const pendingZeroPromise = queue.onPendingZero().then(() => {
+		resolved = true;
+	});
+
+	// Tasks added while waiting are queued and do not affect the pending count
+	queue.add(async () => '🦄');
+	queue.add(async () => '🦄');
+
+	assert.equal(queue.size, 2);
+
+	await delay(50);
+	assert.equal(resolved, false);
+
+	resolveJob1();
+	await pendingZeroPromise;
+
+	assert.equal(resolved, true);
+	assert.equal(queue.pending, 0);
+	assert.equal(queue.size, 2);
+
+	queue.start();
+	await queue.onIdle();
+});
+
+test('.onPendingZero() - resolves when pending reaches zero even if new tasks start', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	queue.add(async () => job1Promise);
+
+	const pendingZeroPromise = queue.onPendingZero();
+
+	// Added while waiting; starts only after the first task finishes
+	const job2 = queue.add(async () => delay(50));
+
+	resolveJob1();
+	await pendingZeroPromise;
+
+	// The promise resolved even though job2 is now running
+	assert.equal(queue.pending, 1);
+
+	await job2;
+	assert.equal(queue.pending, 0);
+});
+
+test('.onPendingZero() - combined with onEmpty and onIdle', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	queue.add(async () => job1Promise);
+	queue.add(async () => delay(50));
+
+	assert.equal(queue.pending, 1);
+	assert.equal(queue.size, 1);
+
+	queue.pause();
+
+	const events: string[] = [];
+
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const emptyPromise = queue.onEmpty().then(() => {
+		events.push('empty');
+	});
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const idlePromise = queue.onIdle().then(() => {
+		events.push('idle');
+	});
+	// eslint-disable-next-line promise/prefer-await-to-then
+	const pendingZeroPromise = queue.onPendingZero().then(() => {
+		events.push('pendingZero');
+	});
+
+	resolveJob1();
+	await pendingZeroPromise;
+
+	// `onPendingZero` resolved even though the queue is not empty
+	assert.deepEqual(events, ['pendingZero']);
+	assert.equal(queue.size, 1);
+
+	queue.start();
+	await emptyPromise;
+	await idlePromise;
+
+	assert.deepEqual(events, ['pendingZero', 'empty', 'idle']);
+});
+
 test('.clear()', () => {
 	const queue = new PQueue({concurrency: 2});
 	queue.add(async () => delay(20_000));

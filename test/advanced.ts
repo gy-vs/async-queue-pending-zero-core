@@ -116,6 +116,61 @@ test('should emit empty event when empty', async () => {
 	assert.equal(timesCalled, 1);
 });
 
+test('should emit pendingZero event when pending count reaches zero', async () => {
+	const queue = new PQueue({concurrency: 1});
+
+	let timesCalled = 0;
+	queue.on('pendingZero', () => {
+		timesCalled++;
+	});
+
+	const {resolve: resolveJob1, promise: job1Promise} = pDefer();
+	const {resolve: resolveJob2, promise: job2Promise} = pDefer();
+
+	const job1 = queue.add(async () => job1Promise);
+	const job2 = queue.add(async () => job2Promise);
+
+	assert.equal(queue.pending, 1);
+	assert.equal(queue.size, 1);
+	assert.equal(timesCalled, 0);
+
+	resolveJob1();
+	await job1;
+
+	// The event is emitted when the pending count reaches zero,
+	// even though a queued task starts running right after.
+	assert.equal(queue.pending, 1);
+	assert.equal(queue.size, 0);
+	assert.equal(timesCalled, 1);
+
+	resolveJob2();
+	await job2;
+
+	assert.equal(queue.pending, 0);
+	assert.equal(queue.size, 0);
+	assert.equal(timesCalled, 2);
+});
+
+test('should not emit pendingZero event while tasks are still running', async () => {
+	const queue = new PQueue({concurrency: 2});
+
+	let timesCalled = 0;
+	queue.on('pendingZero', () => {
+		timesCalled++;
+	});
+
+	queue.add(async () => delay(50));
+	queue.add(async () => delay(150));
+
+	await delay(100);
+
+	assert.equal(queue.pending, 1);
+	assert.equal(timesCalled, 0);
+
+	await queue.onIdle();
+	assert.equal(timesCalled, 1);
+});
+
 test('should emit add event when adding task', async () => {
 	const queue = new PQueue({concurrency: 1});
 

@@ -8,7 +8,7 @@ type Task<TaskResultType> =
 	| ((options: TaskOptions) => PromiseLike<TaskResultType>)
 	| ((options: TaskOptions) => TaskResultType);
 
-type EventName = 'active' | 'idle' | 'empty' | 'add' | 'next' | 'completed' | 'error';
+type EventName = 'active' | 'idle' | 'empty' | 'add' | 'next' | 'completed' | 'error' | 'pendingZero';
 
 /**
 Promise queue with concurrency control.
@@ -102,6 +102,11 @@ export default class PQueue<QueueType extends Queue<RunFunction, EnqueueOptionsT
 
 	#next(): void {
 		this.#pending--;
+
+		if (this.#pending === 0) {
+			this.emit('pendingZero');
+		}
+
 		this.#tryToStartAnother();
 		this.emit('next');
 	}
@@ -459,6 +464,29 @@ export default class PQueue<QueueType extends Queue<RunFunction, EnqueueOptionsT
 		}
 
 		await this.#onEvent('idle');
+	}
+
+	/**
+	The difference with `.onIdle` is that `.onPendingZero` only waits for the currently running tasks to finish and does not require the queue to become empty. Items still waiting in the queue are ignored.
+
+	This is useful when you want to pause the queue, wait for the running tasks to finish, and then safely perform an operation that must not overlap with task execution:
+
+	```js
+	queue.pause();
+	await queue.onPendingZero();
+	// Nothing is running now, so shared resources can be safely modified.
+	queue.start();
+	```
+
+	@returns A promise that settles when all running tasks have finished; `queue.pending === 0`.
+	*/
+	async onPendingZero(): Promise<void> {
+		// Instantly resolve if none pending
+		if (this.#pending === 0) {
+			return;
+		}
+
+		await this.#onEvent('pendingZero');
 	}
 
 	async #onEvent(event: EventName, filter?: () => boolean): Promise<void> {
