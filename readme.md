@@ -236,6 +236,33 @@ The difference with `.onEmpty` is that `.onIdle` guarantees that all work from t
 > [!NOTE]
 > The promise returned by `.onIdle()` resolves **once** when the queue becomes idle. If you want to be notified every time the queue becomes idle, use the `idle` event instead: `queue.on('idle', () => {})`.
 
+#### .onPendingZero()
+
+Returns a promise that settles when there are no more running tasks; `queue.pending === 0`. The queue may still contain items waiting to run.
+
+The difference with `.onIdle` is that `.onPendingZero` does not wait for the queue to become empty. This is useful when you pause the queue and need to wait for the currently running tasks to finish before, for example, modifying shared resources.
+
+```js
+import delay from 'delay';
+import PQueue from 'p-queue';
+
+const queue = new PQueue({concurrency: 2});
+
+queue.add(() => delay(500));
+queue.add(() => delay(500));
+queue.add(() => delay(500));
+
+queue.pause();
+
+// Wait for the running tasks to finish, then safely modify shared resources
+await queue.onPendingZero();
+console.log(`Size: ${queue.size}  Pending: ${queue.pending}`);
+//=> 'Size: 1  Pending: 0'
+```
+
+> [!NOTE]
+> The promise returned by `.onPendingZero()` resolves **once** when the pending count reaches zero. If you want to be notified every time the pending count reaches zero, use the `pendingZero` event instead: `queue.on('pendingZero', () => {})`.
+
 #### .onSizeLessThan(limit)
 
 Returns a promise that settles when the queue size is less than the given limit: `queue.size < limit`.
@@ -418,6 +445,34 @@ await queue.add(() => delay(600));
 ```
 
 The `idle` event is emitted every time the queue reaches an idle state. On the other hand, the promise the `onIdle()` function returns resolves once the queue becomes idle instead of every time the queue is idle.
+
+#### pendingZero
+
+Emitted every time the number of running tasks becomes zero; `queue.pending === 0`. The queue may still contain items waiting to run.
+
+The difference with `idle` is that `pendingZero` does not require the queue to be empty. It is emitted when tasks finish, regardless of whether they completed normally, with an error, by timeout, or by abort.
+
+```js
+import delay from 'delay';
+import PQueue from 'p-queue';
+
+const queue = new PQueue({concurrency: 2});
+
+queue.on('pendingZero', () => {
+	console.log(`Nothing is running.  Size: ${queue.size}  Pending: ${queue.pending}`);
+});
+
+queue.add(() => delay(2000));
+queue.add(() => delay(500));
+queue.add(() => delay(500));
+
+queue.pause();
+
+await queue.onPendingZero();
+// => 'Nothing is running.  Size: 1  Pending: 0'
+```
+
+The `pendingZero` event is emitted every time the pending count reaches zero. On the other hand, the promise the `onPendingZero()` function returns resolves once the pending count reaches zero instead of every time.
 
 #### add
 
